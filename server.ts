@@ -1,6 +1,7 @@
 import express, { Request, Response } from 'express';
 import dotenv from 'dotenv';
 import path from 'path';
+import fs from 'fs';
 import { fileURLToPath } from 'url';
 
 dotenv.config({ path: '.env.local' });
@@ -133,6 +134,97 @@ async function replicateGenerate(promptText: string, lyricsHint: string, duratio
     return { audioUrl, lyricsText };
   } catch (err) {
     console.warn('Replicate error:', err instanceof Error ? err.message : err);
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// ACE-Step local API (FREE vocals — e.g. Colab/Kaggle free GPU notebook).
+// Set ACESTEP_API_URL to the API server address (http://localhost:8001 or an
+// ngrok public URL). Flow downloads the generated mp3 into public/vocals/.
+// ---------------------------------------------------------------------------
+const ACESTEP_API_URL = (process.env.ACESTEP_API_URL || '').replace(/\/$/, '');
+
+interface AcestepSong {
+  localPath: string; // served as /vocals/xxx.mp3
+}
+
+async function acestepGenerate(
+  songPrompt: string,
+  lyricsHint: string,
+  bpm: number,
+  key: string,
+  durationSeconds: number,
+): Promise<AcestepSong[] | null> {
+  if (!ACESTEP_API_URL) return null;
+  try {
+    const headers = { 'Content-Type': 'application/json' };
+    const health = await fetch(`${ACESTEP_API_URL}/health`).then((r) => r.ok).catch(() => false);
+    if (!health) {
+      console.warn('ACE-Step API unreachable:', ACESTEP_API_URL);
+      return null;
+    }
+    const rel = await fetch(`${ACESTEP_API_URL}/release_task`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        prompt: songPrompt,
+        lyrics: lyricsHint,
+        vocal_language: 'pt',
+        audio_format: 'mp3',
+        audio_duration: Math.max(15, Math.min(180, durationSeconds)),
+        bpm,
+        key_scale: key,
+        batch_size: 2,
+        use_random_seed: true,
+      }),
+    });
+    if (!rel.ok) {
+      console.warn('ACE-Step release_task failed:', rel.status);
+      return null;
+    }
+    const relData = (await rel.json()) as { data?: { task_id?: string } };
+    const taskId = relData.data?.task_id;
+    if (!taskId) return null;
+
+    const deadline = Date.now() + 8 * 60 * 1000;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 6000));
+      const q = await fetch(`${ACESTEP_API_URL}/query_result`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ task_id_list: [taskId] }),
+      });
+      if (!q.ok) continue;
+      const qd = (await q.json()) as { data?: { status?: number; result?: string }[] };
+      const job = qd.data?.[0];
+      if (!job) continue;
+      if (job.status === 2) {
+        console.warn('ACE-Step task failed');
+        return null;
+      }
+      if (job.status === 1 && job.result) {
+        const items = JSON.parse(job.result) as { file?: string }[];
+        const saved: AcestepSong[] = [];
+        const vocalsDir = path.resolve(__dirname, 'public', 'vocals');
+        fs.mkdirSync(vocalsDir, { recursive: true });
+        for (let i = 0; i < items.slice(0, 2).length; i++) {
+          const fileUrl = items[i].file;
+          if (!fileUrl) continue;
+          const dl = await fetch(`${ACESTEP_API_URL}${fileUrl}`);
+          if (!dl.ok) continue;
+          const buf = Buffer.from(await dl.arrayBuffer());
+          const name = `song_${Date.now()}_${i}_${Math.random().toString(36).substring(2, 7)}.mp3`;
+          fs.writeFileSync(path.join(vocalsDir, name), buf);
+          saved.push({ localPath: `/vocals/${name}` });
+        }
+        return saved.length > 0 ? saved : null;
+      }
+    }
+    console.warn('ACE-Step task timed out');
+    return null;
+  } catch (err) {
+    console.warn('ACE-Step error:', err instanceof Error ? err.message : err);
     return null;
   }
 }
@@ -539,20 +631,23 @@ app.get('/api/health', (_req: Request, res: Response) => {
     status: 'ok',
     timestamp: Date.now(),
     geminiEnabled: Boolean(GEMINI_API_KEY),
-    vocalsEnabled: Boolean(REPLICATE_API_TOKEN),
+    vocalsEnabled: Boolean(REPLICATE_API_TOKEN || ACESTEP_API_URL),
   });
 });
 
 app.get('/api/engines', (_req: Request, res: Response) => {
   res.json({
     engines: [
-      ...(REPLICATE_API_TOKEN
+      ...(ACESTEP_API_URL
+        ? [{ id: 'acestep-vocals', label: 'Vocais reais GRÁTIS (ACE-Step)', recommended: true }]
+        : []),
+      ...(REPLICATE_API_TOKEN && !ACESTEP_API_URL
         ? [{ id: 'replicate-music', label: `Música real com vocais (${REPLICATE_MUSIC_MODEL})`, recommended: true }]
         : []),
-      { id: 'flow', label: 'Motor Flow (sintetizado local + coro)', recommended: !REPLICATE_API_TOKEN },
+      { id: 'flow', label: 'Motor Flow (sintetizado local + coro)', recommended: !REPLICATE_API_TOKEN && !ACESTEP_API_URL },
     ],
     geminiEnabled: Boolean(GEMINI_API_KEY),
-    vocalsEnabled: Boolean(REPLICATE_API_TOKEN),
+    vocalsEnabled: Boolean(REPLICATE_API_TOKEN || ACESTEP_API_URL),
   });
 });
 
@@ -654,15 +749,32 @@ Regras: 4-5 faixas (voz principal, harmonia, baixo midi 30-48, bateria drum_kit 
       lyriaNote: note,
     });
 
-    // Real AI audio with vocals (Replicate) — 2 parallel variations.
-    // Falls back to local synth when no token or on any failure.
+    // Real AI audio with vocals — FREE path first (ACE-Step), then Replicate.
+    // Falls back to local synth when nothing is configured or on any failure.
     let songA = mkSong(dataA, usedModelA, noteA, 'a');
     let songB = mkSong({ title: localB.title, tracks: localB.tracks, lyrics: localB.lyrics }, 'flow-composer', undefined, 'b');
 
-    if (REPLICATE_API_TOKEN) {
-      const lyricsHintA = localA.lyrics.map((l) => `[${l.section}] ${l.text}`).join('\n');
-      const lyricsHintB = localB.lyrics.map((l) => `[${l.section}] ${l.text}`).join('\n');
-      const fullPrompt = `${style} ${mood} song, ${safeBpm} BPM in ${key}: ${String(prompt).slice(0, 400)}`;
+    const lyricsHintA = localA.lyrics.map((l) => `[${l.section}] ${l.text}`).join('\n');
+    const lyricsHintB = localB.lyrics.map((l) => `[${l.section}] ${l.text}`).join('\n');
+    const fullPrompt = `${style} ${mood} song, ${safeBpm} BPM in ${key}: ${String(prompt).slice(0, 400)}`;
+
+    if (ACESTEP_API_URL) {
+      const ace = await acestepGenerate(fullPrompt, lyricsHintA, safeBpm, String(key), safeDuration);
+      if (ace && ace.length > 0) {
+        songA = mkSong({ ...dataA }, 'acestep-vocals', 'Voz real gerada por IA (ACE-Step, gratuito).', 'a', ace[0].localPath);
+        if (ace[1]) {
+          songB = mkSong(
+            { title: localB.title, tracks: localB.tracks, lyrics: localB.lyrics },
+            'acestep-vocals',
+            'Voz real gerada por IA (ACE-Step, gratuito).',
+            'b',
+            ace[1].localPath,
+          );
+        }
+      }
+    }
+
+    if (!songA.audioUrl && REPLICATE_API_TOKEN) {
       const [repA, repB] = await Promise.all([
         replicateGenerate(`${fullPrompt} (variation 1)`, lyricsHintA, safeDuration),
         replicateGenerate(`${fullPrompt} (variation 2)`, lyricsHintB, safeDuration),
