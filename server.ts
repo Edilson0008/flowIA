@@ -139,6 +139,130 @@ async function replicateGenerate(promptText: string, lyricsHint: string, duratio
 }
 
 // ---------------------------------------------------------------------------
+// ACE-Step PUBLIC demo (FREE vocals, zero-config).
+// Calls the official public Space via its Gradio API, downloads the sung mp3s
+// into public/vocals/ and parses real LRC timestamps for karaoke.
+// Disable with HF_SPACE_DISABLED=1. Falls back silently on any failure.
+// ---------------------------------------------------------------------------
+const HF_SPACE_URL = (process.env.HF_SPACE_URL || 'https://ace-step-ace-step-v1-5.hf.space').replace(/\/$/, '');
+const HF_SPACE_ENABLED = process.env.HF_SPACE_DISABLED !== '1';
+// Optional free HF account token: raises ZeroGPU quota (signup free at huggingface.co)
+const HF_TOKEN = process.env.HF_TOKEN || '';
+const hfHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
+if (HF_TOKEN) hfHeaders.Authorization = `Bearer ${HF_TOKEN}`;
+
+interface HfVocalSong {
+  localPath: string;
+  lrcText?: string;
+}
+
+function parseLrc(lrc: string, bpm: number): { section: string; text: string; startBeat: number; timestamp: number }[] {
+  const secondsPerBeat = 60 / bpm;
+  const lines = lrc.split('\n').map((l) => l.trim()).filter(Boolean);
+  const out: { section: string; text: string; startBeat: number; timestamp: number }[] = [];
+  for (const line of lines) {
+    const m = line.match(/\[(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?\]\s*(.*)/);
+    if (!m) continue;
+    const sec = parseInt(m[1], 10) * 60 + parseInt(m[2], 10) + (m[3] ? parseInt(m[3].padEnd(3, '0').slice(0, 3), 10) / 1000 : 0);
+    const text = (m[4] || '').trim();
+    if (!text) continue;
+    const beat = Math.round((sec / secondsPerBeat) * 100) / 100;
+    out.push({ section: text.match(/^\[(.+?)\]/)?.[1] || 'Voz', text: text.replace(/^\[.+?\]\s*/, ''), startBeat: beat, timestamp: Math.round(sec * 10) / 10 });
+  }
+  return out;
+}
+
+async function hfSpaceGenerate(
+  songPrompt: string,
+  lyricsHint: string,
+  bpm: number,
+  key: string,
+  durationSeconds: number,
+): Promise<HfVocalSong[] | null> {
+  if (!HF_SPACE_ENABLED) return null;
+  try {
+    const data = [
+      'acestep-v15-turbo', 'custom', '', 'unknown',
+      songPrompt.slice(0, 400), lyricsHint.slice(0, 1500),
+      bpm, key, '4', 'pt',
+      8, 7.0, true, '-1', null,
+      Math.max(15, Math.min(120, durationSeconds)), 2, null, '', 0.0, -1,
+      'Fill the audio semantic mask based on the given conditions:', 1.0, 'text2music', false, 0.0, 1.0,
+      3.0, 'ode', '', 'mp3',
+      0.85, false, 2.0, 0, 0.9, 'NO USER INPUT',
+      true, true, true, false, true, false, false, true,
+      0.5, 8, null, [], false,
+    ];
+    const callRes = await fetch(`${HF_SPACE_URL}/gradio_api/call/generation_wrapper`, {
+      method: 'POST',
+      headers: hfHeaders,
+      body: JSON.stringify({ data }),
+    });
+    if (!callRes.ok) return null;
+    const { event_id } = (await callRes.json()) as { event_id?: string };
+    if (!event_id) return null;
+
+    const stream = await fetch(`${HF_SPACE_URL}/gradio_api/call/generation_wrapper/${event_id}`, {
+      headers: { Accept: 'text/event-stream', ...(HF_TOKEN ? { Authorization: `Bearer ${HF_TOKEN}` } : {}) },
+    });
+    if (!stream.ok || !stream.body) return null;
+
+    const deadline = Date.now() + 6 * 60 * 1000;
+    let buf = '';
+    let finalData: unknown[] | null = null;
+    const reader = stream.body.getReader();
+    const decoder = new TextDecoder();
+    outer: while (Date.now() < deadline) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop() || '';
+      for (const line of lines) {
+        const t = line.trim();
+        if (!t.startsWith('data:')) continue;
+        const payload = t.slice(5).trim();
+        if (!payload || payload === '[DONE]') continue;
+        try {
+          const msg = JSON.parse(payload) as { msg?: string; output?: { data?: unknown[] } };
+          if (msg.msg === 'process_completed' && msg.output?.data) {
+            finalData = msg.output.data;
+            break outer;
+          }
+          if (msg.msg === 'process_failed' || msg.msg === 'error') return null;
+        } catch { /* partial chunk */ }
+      }
+    }
+    try { await reader.cancel(); } catch { /* ignore */ }
+    if (!finalData) return null;
+
+    const vocalsDir = path.resolve(__dirname, 'public', 'vocals');
+    fs.mkdirSync(vocalsDir, { recursive: true });
+    const saved: HfVocalSong[] = [];
+    // outputs[0..7] = audio files (we asked batch_size 2 → first two)
+    for (let i = 0; i < 2; i++) {
+      const audio = finalData[i] as { url?: string } | null;
+      const url = audio?.url;
+      if (!url) continue;
+      const abs = url.startsWith('http') ? url : `${HF_SPACE_URL}${url.startsWith('/') ? '' : '/'}${url}`;
+      const dl = await fetch(abs);
+      if (!dl.ok) continue;
+      const bufAudio = Buffer.from(await dl.arrayBuffer());
+      if (bufAudio.length < 10 * 1024) continue; // ignore stubs
+      const name = `hf_${Date.now()}_${i}_${Math.random().toString(36).substring(2, 7)}.mp3`;
+      fs.writeFileSync(path.join(vocalsDir, name), bufAudio);
+      // LRC outputs start after 8 audios + file + markdown + status + seed + 8 scores + 8 codes = index 28+i
+      const lrcRaw = finalData[28 + i];
+      saved.push({ localPath: `/vocals/${name}`, lrcText: typeof lrcRaw === 'string' ? lrcRaw : undefined });
+    }
+    return saved.length > 0 ? saved : null;
+  } catch (err) {
+    console.warn('HF Space vocals error:', err instanceof Error ? err.message : err);
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // ACE-Step local API (FREE vocals — e.g. Colab/Kaggle free GPU notebook).
 // Set ACESTEP_API_URL to the API server address (http://localhost:8001 or an
 // ngrok public URL). Flow downloads the generated mp3 into public/vocals/.
@@ -631,15 +755,18 @@ app.get('/api/health', (_req: Request, res: Response) => {
     status: 'ok',
     timestamp: Date.now(),
     geminiEnabled: Boolean(GEMINI_API_KEY),
-    vocalsEnabled: Boolean(REPLICATE_API_TOKEN || ACESTEP_API_URL),
+    vocalsEnabled: Boolean(REPLICATE_API_TOKEN || ACESTEP_API_URL || HF_SPACE_ENABLED),
   });
 });
 
 app.get('/api/engines', (_req: Request, res: Response) => {
   res.json({
     engines: [
-      ...(ACESTEP_API_URL
-        ? [{ id: 'acestep-vocals', label: 'Vocais reais GRÁTIS (ACE-Step)', recommended: true }]
+      ...(HF_SPACE_ENABLED
+        ? [{ id: 'acestep-vocals', label: 'Vocais reais GRÁTIS (demo pública)', recommended: true }]
+        : []),
+      ...(ACESTEP_API_URL && !HF_SPACE_ENABLED
+        ? [{ id: 'acestep-local', label: 'Vocais reais GRÁTIS (seu Colab)', recommended: true }]
         : []),
       ...(REPLICATE_API_TOKEN && !ACESTEP_API_URL
         ? [{ id: 'replicate-music', label: `Música real com vocais (${REPLICATE_MUSIC_MODEL})`, recommended: true }]
@@ -647,7 +774,7 @@ app.get('/api/engines', (_req: Request, res: Response) => {
       { id: 'flow', label: 'Motor Flow (sintetizado local + coro)', recommended: !REPLICATE_API_TOKEN && !ACESTEP_API_URL },
     ],
     geminiEnabled: Boolean(GEMINI_API_KEY),
-    vocalsEnabled: Boolean(REPLICATE_API_TOKEN || ACESTEP_API_URL),
+    vocalsEnabled: Boolean(REPLICATE_API_TOKEN || ACESTEP_API_URL || HF_SPACE_ENABLED),
   });
 });
 
@@ -758,7 +885,34 @@ Regras: 4-5 faixas (voz principal, harmonia, baixo midi 30-48, bateria drum_kit 
     const lyricsHintB = localB.lyrics.map((l) => `[${l.section}] ${l.text}`).join('\n');
     const fullPrompt = `${style} ${mood} song, ${safeBpm} BPM in ${key}: ${String(prompt).slice(0, 400)}`;
 
-    if (ACESTEP_API_URL) {
+    const applyVocalFiles = (
+      files: { localPath: string; lrcText?: string }[],
+      tag: string,
+      note: string,
+    ) => {
+      if (files[0]) {
+        const lyricsA = files[0].lrcText
+          ? parseLrc(files[0].lrcText, safeBpm)
+          : (dataA.lyrics as { section: string; text: string; startBeat?: number; timestamp?: number }[]);
+        songA = mkSong({ ...dataA, lyrics: lyricsA }, tag, note, 'a', files[0].localPath);
+      }
+      if (files[1]) {
+        const lyricsB = files[1].lrcText
+          ? parseLrc(files[1].lrcText, safeBpm)
+          : localB.lyrics;
+        songB = mkSong({ title: localB.title, tracks: localB.tracks, lyrics: lyricsB }, tag, note, 'b', files[1].localPath);
+      }
+    };
+
+    // 1) Public demo (grátis, sem configurar nada)
+    if (!songA.audioUrl) {
+      const hf = await hfSpaceGenerate(fullPrompt, lyricsHintA, safeBpm, String(key), safeDuration);
+      if (hf && hf.length > 0) {
+        applyVocalFiles(hf, 'acestep-vocals', 'Voz real gerada por IA (ACE-Step, gratuito).');
+      }
+    }
+
+    if (ACESTEP_API_URL && !songA.audioUrl) {
       const ace = await acestepGenerate(fullPrompt, lyricsHintA, safeBpm, String(key), safeDuration);
       if (ace && ace.length > 0) {
         songA = mkSong({ ...dataA }, 'acestep-vocals', 'Voz real gerada por IA (ACE-Step, gratuito).', 'a', ace[0].localPath);
