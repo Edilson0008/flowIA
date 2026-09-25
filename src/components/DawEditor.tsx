@@ -5,7 +5,6 @@ import {
   Square,
   Repeat,
   Download,
-  Share2,
   Volume2,
   VolumeX,
   Plus,
@@ -28,7 +27,6 @@ import { downloadMidi, midiToNoteName, noteNameToMidi } from '../services/midiEn
 interface DawEditorProps {
   project: SongProject;
   onUpdateProject: (updated: SongProject) => void;
-  onOpenShareModal: (project: SongProject) => void;
 }
 
 const INSTRUMENT_OPTIONS: { id: InstrumentType; label: string }[] = [
@@ -49,7 +47,6 @@ const INSTRUMENT_OPTIONS: { id: InstrumentType; label: string }[] = [
 export const DawEditor: React.FC<DawEditorProps> = ({
   project,
   onUpdateProject,
-  onOpenShareModal,
 }) => {
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentBeat, setCurrentBeat] = useState(0);
@@ -318,14 +315,6 @@ export const DawEditor: React.FC<DawEditorProps> = ({
 
         {/* Global Transport & Export Action Hub */}
         <div className="flex items-center gap-2.5">
-          {/* Share Button */}
-          <button
-            onClick={() => onOpenShareModal(project)}
-            className="flex items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-800/80 px-3 py-2 text-xs font-semibold text-slate-200 transition hover:bg-slate-700"
-          >
-            <Share2 className="h-3.5 w-3.5 text-pink-400" />
-            <span>Compartilhar</span>
-          </button>
 
           {/* Export Dropdown */}
           <div className="relative">

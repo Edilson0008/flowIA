@@ -33,16 +33,85 @@ export class AudioEngine {
     if (!this.ctx) {
       const AudioContextClass = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
       this.ctx = new AudioContextClass();
-      this.masterGain = this.ctx.createGain();
-      this.masterGain.gain.setValueAtTime(0.85, this.ctx.currentTime);
-      this.analyser = this.ctx.createAnalyser();
-      this.analyser.fftSize = 256;
-      this.masterGain.connect(this.analyser);
-      this.analyser.connect(this.ctx.destination);
+      const chain = this.buildMasterChain(this.ctx, this.ctx.destination);
+      this.masterGain = chain.input;
+      this.analyser = chain.analyser;
     }
     if (this.ctx.state === 'suspended') {
       this.ctx.resume();
     }
+  }
+
+  /**
+   * Master bus: dry + generated-impulse reverb + tempo-synced-ish delay
+   * into a glue compressor. Used for realtime and offline rendering.
+   */
+  private buildMasterChain(ctx: BaseAudioContext, destination: AudioDestinationNode): { input: GainNode; analyser: AnalyserNode } {
+    const input = ctx.createGain();
+    input.gain.setValueAtTime(0.85, ctx.currentTime);
+
+    const comp = ctx.createDynamicsCompressor();
+    comp.threshold.setValueAtTime(-14, ctx.currentTime);
+    comp.knee.setValueAtTime(22, ctx.currentTime);
+    comp.ratio.setValueAtTime(5, ctx.currentTime);
+    comp.attack.setValueAtTime(0.004, ctx.currentTime);
+    comp.release.setValueAtTime(0.18, ctx.currentTime);
+
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 256;
+
+    // Dry
+    const dry = ctx.createGain();
+    dry.gain.setValueAtTime(0.9, ctx.currentTime);
+    input.connect(dry);
+    dry.connect(comp);
+
+    // Reverb (generated impulse)
+    try {
+      const conv = ctx.createConvolver();
+      conv.buffer = this.makeImpulse(ctx, 1.9, 2.6);
+      const wet = ctx.createGain();
+      wet.gain.setValueAtTime(0.24, ctx.currentTime);
+      input.connect(conv);
+      conv.connect(wet);
+      wet.connect(comp);
+    } catch {
+      // Convolver unavailable — dry only
+    }
+
+    // Slapback / echo with feedback
+    try {
+      const delay = ctx.createDelay(1.0);
+      delay.delayTime.setValueAtTime(0.32, ctx.currentTime);
+      const fb = ctx.createGain();
+      fb.gain.setValueAtTime(0.32, ctx.currentTime);
+      const echoOut = ctx.createGain();
+      echoOut.gain.setValueAtTime(0.16, ctx.currentTime);
+      input.connect(delay);
+      delay.connect(fb);
+      fb.connect(delay);
+      delay.connect(echoOut);
+      echoOut.connect(comp);
+    } catch {
+      // Delay unavailable — skip
+    }
+
+    comp.connect(analyser);
+    analyser.connect(destination);
+    return { input, analyser };
+  }
+
+  private makeImpulse(ctx: BaseAudioContext, seconds: number, decay: number): AudioBuffer {
+    const rate = ctx.sampleRate;
+    const len = Math.floor(rate * seconds);
+    const buf = ctx.createBuffer(2, len, rate);
+    for (let c = 0; c < 2; c++) {
+      const data = buf.getChannelData(c);
+      for (let i = 0; i < len; i++) {
+        data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, decay);
+      }
+    }
+    return buf;
   }
 
   public getAnalyser(): AnalyserNode | null {
@@ -601,10 +670,8 @@ export class AudioEngine {
     const totalSeconds = Math.max(3, maxBeat * secondsPerBeat + 1.5);
     const offlineCtx = new OfflineAudioContext(2, Math.ceil(totalSeconds * sampleRate), sampleRate);
 
-    // Master bus
-    const offlineMaster = offlineCtx.createGain();
-    offlineMaster.gain.setValueAtTime(0.85, 0);
-    offlineMaster.connect(offlineCtx.destination);
+    // Master bus with FX
+    const offlineMaster = this.buildMasterChain(offlineCtx, offlineCtx.destination).input;
 
     const hasAnySolo = project.tracks.some((t) => t.solo);
 

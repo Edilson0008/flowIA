@@ -1,6 +1,8 @@
-# Melodix AI — Crie Músicas com IA
+# Flow AI — Crie Músicas com IA (estilo Suno)
 
-Gere músicas inéditas com IA, edite no DAW multi-faixas e exporte em **MIDI** e **WAV**.
+Descreva a música → receba **2 variações prontas** com estrutura completa
+(intro, versos, refrões, ponte, outro), letra em português com **karaokê**,
+e exportação em **WAV** e **MIDI**. Sem chave de API, sem erro.
 
 ## Como rodar
 
@@ -8,36 +10,31 @@ Pré-requisitos: **Node.js 18+**
 
 ```bash
 npm install
-cp .env.example .env   # opcional: preencha GEMINI_API_KEY para refinamento via Gemini
 npm run dev            # http://localhost:3000
 ```
 
-Build de produção:
+Opcional (refino da variação A via Gemini): crie `.env` com `GEMINI_API_KEY=...`.
 
-```bash
-npm run build
-npm start              # NODE_ENV=production
-```
+Produção: `npm run build` + `npm start`.
 
-## Motor de criação (corrigido)
+## Como funciona
 
-O botão **"Criar Música Agora"** (`POST /api/generate-music`) nunca mais retorna erro genérico:
+- `POST /api/generate-music` — Motor Flow: composição por seções com intensidade
+  (refrão com lift de oitava, viradas de bateria, arpejos), instrumentação
+  automática por estilo, 2 variações por pedido, letras com `startBeat`/`timestamp`.
+  Se houver `GEMINI_API_KEY`, tenta refinar a variação A; senão, tudo local.
+- `POST /api/enhance-prompt` — melhora o prompt (com ou sem chave).
+- `GET /api/engines`, `GET /api/health` — motores e status.
 
-- **Antes:** usava o modelo inexistente `gemini-3.8-flash` e chamava o Lyria via `generateContent`
-  (API errada) — qualquer clique falhava. O `MusicCreator` ainda vinha com `lyria-clip` como padrão.
-- **Agora:** compositor local determinístico (teoria musical: progressão no tom, melodia pentatônica,
-  baixo com groove, bateria por estilo) **sempre** gera o arranjo; se houver `GEMINI_API_KEY`,
-  o Gemini (modelos válidos `gemini-2.0-flash`/`gemini-1.5-flash`) tenta refinar o JSON, com fallback
-  automático para o arranjo local. O padrão do frontend passou a ser `gemini-flash`.
-- Prompt vazio retorna `400` com mensagem clara em vez de `500`.
-- `POST /api/enhance-prompt` também funciona sem chave (template local).
-- `GET /api/engines` lista os motores disponíveis; `GET /api/health` indica `geminiEnabled`.
+## Telas
 
-## Estrutura
+- **Criar** — prompt, estilos, clima, BPM, tom, duração (30s/60s), 2 resultados com
+  player, karaokê, WAV/MIDI e "Abrir no Estúdio".
+- **Biblioteca** — todas as criações salvas (IndexedDB), com busca, filtros,
+  favoritos, preview e exportação.
+- **Estúdio** — DAW multi-faixas: editar notas, volumes, instrumentos e exportar.
 
-- `server.ts` — Express + Vite middleware (dev) / estáticos (prod), sync em `.data/`
-- `src/components/MusicCreator.tsx` — tela de criação
-- `src/components/DawEditor.tsx` — editor multi-faixas
-- `src/services/audioEngine.ts` — sintetizador Web Audio + export WAV
-- `src/services/midiEncoder.ts` — export MIDI
-- `src/services/storage.ts` / `cloudSync.ts` — persistência offline + sync
+## Som
+
+`audioEngine.ts` — sintetizador Web Audio com master bus (reverb por convolução,
+delay com feedback e compressor), render offline para WAV 44.1kHz.

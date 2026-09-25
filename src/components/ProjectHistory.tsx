@@ -7,7 +7,6 @@ import {
   Pause,
   Sliders,
   Download,
-  Share2,
   Trash2,
   Copy,
   Star,
@@ -22,7 +21,6 @@ import { downloadMidi } from '../services/midiEncoder';
 interface ProjectHistoryProps {
   projects: SongProject[];
   onSelectProjectForDaw: (project: SongProject) => void;
-  onOpenShareModal: (project: SongProject) => void;
   onToggleFavorite: (id: string) => void;
   onDuplicateProject: (project: SongProject) => void;
   onDeleteProject: (id: string) => void;
@@ -32,7 +30,6 @@ interface ProjectHistoryProps {
 export const ProjectHistory: React.FC<ProjectHistoryProps> = ({
   projects,
   onSelectProjectForDaw,
-  onOpenShareModal,
   onToggleFavorite,
   onDuplicateProject,
   onDeleteProject,
@@ -256,15 +253,6 @@ export const ProjectHistory: React.FC<ProjectHistoryProps> = ({
                     title="Baixar partitura MIDI (.mid)"
                   >
                     <Music className="h-3.5 w-3.5" />
-                  </button>
-
-                  {/* Share button */}
-                  <button
-                    onClick={() => onOpenShareModal(project)}
-                    className="rounded-xl border border-slate-700 bg-slate-800 p-2 text-slate-300 transition hover:bg-slate-700 hover:text-pink-400"
-                    title="Compartilhar nas redes sociais"
-                  >
-                    <Share2 className="h-3.5 w-3.5" />
                   </button>
 
                   {/* Duplicate */}

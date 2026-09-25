@@ -3,29 +3,17 @@ import { Header } from './components/Header';
 import { MusicCreator } from './components/MusicCreator';
 import { DawEditor } from './components/DawEditor';
 import { ProjectHistory } from './components/ProjectHistory';
-import { CloudSyncModal } from './components/CloudSyncModal';
-import { BackupManagerModal } from './components/BackupManagerModal';
-import { SocialShareModal } from './components/SocialShareModal';
 import { SongProject } from './types';
 import { storageService } from './services/storage';
-import { cloudSyncService } from './services/cloudSync';
-import { WifiOff, CheckCircle2, Sliders, Sparkles, FolderHeart } from 'lucide-react';
+import { WifiOff, CheckCircle2, Sliders } from 'lucide-react';
 
 export default function App() {
-  const [currentTab, setCurrentTab] = useState<'creator' | 'daw' | 'history'>('creator');
+  const [currentTab, setCurrentTab] = useState<'criar' | 'estudio' | 'biblioteca'>('criar');
   const [projects, setProjects] = useState<SongProject[]>([]);
   const [activeProject, setActiveProject] = useState<SongProject | null>(null);
-  const [shareModalProject, setShareModalProject] = useState<SongProject | null>(null);
-
-  // Modals
-  const [isCloudSyncOpen, setIsCloudSyncOpen] = useState(false);
-  const [isBackupManagerOpen, setIsBackupManagerOpen] = useState(false);
-
-  // Toast notifications
-  const [toast, setToast] = useState<{ message: string; type: 'success' | 'info' } | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
   const [isOnline, setIsOnline] = useState(typeof navigator !== 'undefined' ? navigator.onLine : true);
 
-  // Load initial projects from IndexedDB
   const refreshProjects = async () => {
     try {
       const list = await storageService.getAllProjects();
@@ -43,46 +31,40 @@ export default function App() {
 
   useEffect(() => {
     refreshProjects();
-
     const handleOnline = () => setIsOnline(true);
     const handleOffline = () => setIsOnline(false);
-
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
-
     return () => {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const showToast = (message: string, type: 'success' | 'info' = 'success') => {
-    setToast({ message, type });
+  const showToast = (message: string) => {
+    setToast(message);
     setTimeout(() => setToast(null), 3500);
   };
 
-  // Called when AI generates a new song
-  const handleSongGenerated = async (newSong: SongProject) => {
-    await storageService.saveProject(newSong);
+  // Called when Flow generates new songs (2 variations)
+  const handleSongsGenerated = async (newSongs: SongProject[]) => {
+    for (const s of newSongs) await storageService.saveProject(s);
     await refreshProjects();
-    setActiveProject(newSong);
-    setCurrentTab('daw');
-    showToast(`Música "${newSong.title}" gerada com sucesso! Aberta no DAW.`);
-
-    // Automatically trigger cloud sync in background if online
-    if (navigator.onLine) {
-      cloudSyncService.syncToCloud().catch(console.error);
-    }
+    showToast(`${newSongs.length} músicas criadas e salvas na Biblioteca!`);
   };
 
-  // Called when tracks, instruments, notes or parameters are edited in DAW
+  const handleOpenInStudio = (project: SongProject) => {
+    setActiveProject(project);
+    setCurrentTab('estudio');
+  };
+
   const handleUpdateProject = async (updated: SongProject) => {
     setActiveProject(updated);
     await storageService.saveProject(updated);
     setProjects((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
   };
 
-  // Toggle favorite
   const handleToggleFavorite = async (id: string) => {
     const proj = projects.find((p) => p.id === id);
     if (!proj) return;
@@ -90,10 +72,9 @@ export default function App() {
     await storageService.saveProject(updated);
     setProjects((prev) => prev.map((p) => (p.id === id ? updated : p)));
     if (activeProject?.id === id) setActiveProject(updated);
-    showToast(updated.isFavorite ? 'Adicionado aos favoritos' : 'Removido dos favoritos', 'info');
+    showToast(updated.isFavorite ? 'Adicionado aos favoritos' : 'Removido dos favoritos');
   };
 
-  // Duplicate project
   const handleDuplicateProject = async (source: SongProject) => {
     const clone: SongProject = {
       ...source,
@@ -104,120 +85,69 @@ export default function App() {
     };
     await storageService.saveProject(clone);
     await refreshProjects();
-    showToast(`Projeto duplicado como "${clone.title}"`);
+    showToast(`Duplicada como "${clone.title}"`);
   };
 
-  // Delete project
   const handleDeleteProject = async (id: string) => {
-    const confirm = window.confirm('Tem certeza que deseja excluir esta música?');
-    if (!confirm) return;
+    if (!window.confirm('Excluir esta música?')) return;
     await storageService.deleteProject(id);
     const updatedList = projects.filter((p) => p.id !== id);
     setProjects(updatedList);
-    if (activeProject?.id === id) {
-      setActiveProject(updatedList[0] || null);
-    }
-    showToast('Música excluída com sucesso', 'info');
-  };
-
-  // Open in DAW
-  const handleSelectProjectForDaw = (project: SongProject) => {
-    setActiveProject(project);
-    setCurrentTab('daw');
+    if (activeProject?.id === id) setActiveProject(updatedList[0] || null);
+    showToast('Música excluída');
   };
 
   return (
     <div className="flex min-h-screen flex-col bg-[#0b0c13] text-slate-100 font-sans">
-      {/* Top Application Header */}
-      <Header
-        currentTab={currentTab}
-        setCurrentTab={setCurrentTab}
-        onOpenCloudSync={() => setIsCloudSyncOpen(true)}
-        onOpenBackupManager={() => setIsBackupManagerOpen(true)}
-        projectCount={projects.length}
-      />
+      <Header currentTab={currentTab} setCurrentTab={setCurrentTab} projectCount={projects.length} />
 
-      {/* Main Content Area */}
       <main className="flex-1 pb-16">
-        {currentTab === 'creator' && (
-          <MusicCreator onSongGenerated={handleSongGenerated} />
+        {currentTab === 'criar' && (
+          <MusicCreator onSongsGenerated={handleSongsGenerated} onOpenInStudio={handleOpenInStudio} />
         )}
 
-        {currentTab === 'daw' && (
+        {currentTab === 'estudio' && (
           activeProject ? (
-            <DawEditor
-              project={activeProject}
-              onUpdateProject={handleUpdateProject}
-              onOpenShareModal={(p) => setShareModalProject(p)}
-            />
+            <DawEditor project={activeProject} onUpdateProject={handleUpdateProject} />
           ) : (
             <div className="mx-auto max-w-xl p-12 text-center text-slate-400">
               <Sliders className="mx-auto h-12 w-12 text-purple-500/40" />
               <h2 className="mt-4 text-lg font-bold text-white">Nenhum projeto selecionado</h2>
-              <p className="mt-1 text-xs text-slate-400">
-                Gere uma nova música no criador ou selecione uma faixa existente no seu histórico.
-              </p>
+              <p className="mt-1 text-xs text-slate-400">Crie uma música ou escolha uma na Biblioteca.</p>
               <button
-                onClick={() => setCurrentTab('creator')}
+                onClick={() => setCurrentTab('criar')}
                 className="mt-5 rounded-xl bg-purple-600 px-4 py-2 text-xs font-bold text-white hover:bg-purple-500"
               >
-                Ir para o Criador IA
+                Criar música
               </button>
             </div>
           )
         )}
 
-        {currentTab === 'history' && (
+        {currentTab === 'biblioteca' && (
           <ProjectHistory
             projects={projects}
-            onSelectProjectForDaw={handleSelectProjectForDaw}
-            onOpenShareModal={(p) => setShareModalProject(p)}
+            onSelectProjectForDaw={handleOpenInStudio}
             onToggleFavorite={handleToggleFavorite}
             onDuplicateProject={handleDuplicateProject}
             onDeleteProject={handleDeleteProject}
-            onNewMusicClick={() => setCurrentTab('creator')}
+            onNewMusicClick={() => setCurrentTab('criar')}
           />
         )}
       </main>
 
-      {/* Offline Toast Banner */}
       {!isOnline && (
-        <div className="fixed bottom-4 left-4 z-50 flex items-center gap-2 rounded-xl bg-amber-600/95 px-3.5 py-2 text-xs font-semibold text-white shadow-xl backdrop-blur-sm animate-pulse">
+        <div className="fixed bottom-4 left-4 z-50 flex items-center gap-2 rounded-xl bg-amber-600/95 px-3.5 py-2 text-xs font-semibold text-white shadow-xl animate-pulse">
           <WifiOff className="h-4 w-4" />
-          <span>Modo Offline — Suas músicas estão salvas localmente no aparelho.</span>
+          <span>Offline — músicas salvas neste aparelho.</span>
         </div>
       )}
 
-      {/* Global Success / Info Toast */}
       {toast && (
-        <div className="fixed bottom-4 right-4 z-50 flex items-center gap-2.5 rounded-2xl border border-slate-700/80 bg-[#161726]/95 px-4 py-2.5 text-xs font-bold text-white shadow-2xl backdrop-blur-md">
+        <div className="fixed bottom-4 right-4 z-50 flex items-center gap-2.5 rounded-2xl border border-slate-700/80 bg-[#161726]/95 px-4 py-2.5 text-xs font-bold text-white shadow-2xl">
           <CheckCircle2 className="h-4 w-4 text-emerald-400" />
-          <span>{toast.message}</span>
+          <span>{toast}</span>
         </div>
-      )}
-
-      {/* Cloud Sync Modal */}
-      {isCloudSyncOpen && (
-        <CloudSyncModal
-          onClose={() => setIsCloudSyncOpen(false)}
-          onRefreshProjects={refreshProjects}
-        />
-      )}
-
-      {/* Backup Manager Modal */}
-      {isBackupManagerOpen && (
-        <BackupManagerModal
-          onClose={() => setIsBackupManagerOpen(false)}
-          onProjectsRestored={refreshProjects}
-        />
-      )}
-
-      {/* Social Share Modal */}
-      {shareModalProject && (
-        <SocialShareModal
-          song={shareModalProject}
-          onClose={() => setShareModalProject(null)}
-        />
       )}
     </div>
   );

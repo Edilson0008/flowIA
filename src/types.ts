@@ -38,6 +38,7 @@ export interface LyricLine {
   section: string; // "Intro", "Verso 1", "Refrão", "Ponte", "Outro"
   text: string;
   timestamp?: number; // in seconds
+  startBeat?: number; // in beats (for karaoke highlight)
 }
 
 export interface SongProject {
