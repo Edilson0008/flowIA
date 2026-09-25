@@ -1,0 +1,7 @@
+{
+  "name": "Melodix AI",
+  "description": "Generate, edit, and export professional AI-composed music across devices with seamless cloud sync and offline access.",
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
