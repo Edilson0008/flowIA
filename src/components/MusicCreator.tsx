@@ -57,6 +57,7 @@ export const MusicCreator: React.FC<MusicCreatorProps> = ({ onSongsGenerated, on
   const [generationStep, setGenerationStep] = useState('');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [results, setResults] = useState<SongProject[]>([]);
+  const [vocalsEnabled, setVocalsEnabled] = useState(false);
 
   // Player state (singleton engine)
   const [playingId, setPlayingId] = useState<string | null>(null);
@@ -70,6 +71,7 @@ export const MusicCreator: React.FC<MusicCreatorProps> = ({ onSongsGenerated, on
       setPlayingId(null);
       playingRef.current = null;
     });
+    fetch('/api/engines').then((r) => r.json()).then((d) => setVocalsEnabled(Boolean(d.vocalsEnabled))).catch(() => {});
   }, []);
 
   const handleEnhancePrompt = async () => {
@@ -95,7 +97,9 @@ export const MusicCreator: React.FC<MusicCreatorProps> = ({ onSongsGenerated, on
     stopPlayback();
     setIsGenerating(true);
     setErrorMessage(null);
-    setGenerationStep('Compondo estrutura, harmonia e melodia...');
+    setGenerationStep(vocalsEnabled
+      ? 'Gerando música real com vocais... pode levar 1 a 3 minutos, não feche.'
+      : 'Compondo estrutura, harmonia, melodia e coro...');
 
     try {
       const res = await fetch('/api/generate-music', {
@@ -164,7 +168,7 @@ export const MusicCreator: React.FC<MusicCreatorProps> = ({ onSongsGenerated, on
         <div className="relative z-10">
           <div className="inline-flex items-center gap-2 rounded-full border border-purple-500/30 bg-purple-500/10 px-3 py-1 text-xs font-semibold text-purple-300">
             <Sparkles className="h-3.5 w-3.5 text-yellow-400" />
-            <span>Descreva → receba 2 músicas prontas</span>
+            <span>{vocalsEnabled ? 'Música real com vocais — descreva e receba 2 faixas' : 'Descreva → receba 2 músicas prontas'}</span>
           </div>
           <textarea
             value={prompt}

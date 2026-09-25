@@ -72,6 +72,72 @@ async function geminiText(promptText: string): Promise<string | null> {
 }
 
 // ---------------------------------------------------------------------------
+// Real AI music with vocals via Replicate (needs REPLICATE_API_TOKEN).
+// Default model: minimax/music-01 (full songs with singing).
+// Without a token, the Flow local composer is used (no vocals, synth only).
+// ---------------------------------------------------------------------------
+const REPLICATE_API_TOKEN = process.env.REPLICATE_API_TOKEN || '';
+const REPLICATE_MUSIC_MODEL = process.env.REPLICATE_MUSIC_MODEL || 'minimax/music-01';
+
+interface ReplicateSong {
+  audioUrl: string;
+  lyricsText?: string;
+}
+
+async function replicateGenerate(promptText: string, lyricsHint: string, durationHint: number): Promise<ReplicateSong | null> {
+  if (!REPLICATE_API_TOKEN) return null;
+  try {
+    const createRes = await fetch(`https://api.replicate.com/v1/models/${REPLICATE_MUSIC_MODEL}/predictions`, {
+      method: 'POST',
+      headers: { Authorization: `Token ${REPLICATE_API_TOKEN}`, 'Content-Type': 'application/json', Prefer: 'wait' },
+      body: JSON.stringify({ input: { prompt: promptText, lyrics: lyricsHint } }),
+    });
+    if (!createRes.ok) {
+      console.warn('Replicate create failed:', createRes.status, await createRes.text().then((t) => t.slice(0, 300)));
+      return null;
+    }
+    let pred = (await createRes.json()) as { id: string; status: string; output?: unknown; urls?: { get: string } };
+    const deadline = Date.now() + 4.5 * 60 * 1000;
+    while (pred.status !== 'succeeded' && pred.status !== 'failed' && pred.status !== 'canceled') {
+      if (Date.now() > deadline) {
+        console.warn('Replicate prediction timed out:', pred.id);
+        return null;
+      }
+      await new Promise((r) => setTimeout(r, 5000));
+      const poll = await fetch(pred.urls?.get || `https://api.replicate.com/v1/predictions/${pred.id}`, {
+        headers: { Authorization: `Token ${REPLICATE_API_TOKEN}` },
+      });
+      if (!poll.ok) return null;
+      pred = (await poll.json()) as typeof pred;
+    }
+    if (pred.status !== 'succeeded') {
+      console.warn('Replicate prediction failed:', pred.status);
+      return null;
+    }
+    const out = pred.output;
+    let audioUrl = '';
+    let lyricsText: string | undefined;
+    if (typeof out === 'string') audioUrl = out;
+    else if (Array.isArray(out)) {
+      const first = out[0];
+      audioUrl = typeof first === 'string' ? first : (first as { audio?: string })?.audio || '';
+    } else if (out && typeof out === 'object') {
+      const o = out as Record<string, unknown>;
+      const a = o.audio || o.audio_url || o.song || o.music;
+      audioUrl = typeof a === 'string' ? a : '';
+      const l = o.lyrics || o.lyric;
+      if (typeof l === 'string') lyricsText = l;
+    }
+    void durationHint;
+    if (!audioUrl) return null;
+    return { audioUrl, lyricsText };
+  } catch (err) {
+    console.warn('Replicate error:', err instanceof Error ? err.message : err);
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Flow AI Composer — deterministic, section-based, Suno-style.
 // Intro → Verso → Refrão → Verso → Refrão → Ponte → Refrão Final → Outro,
 // with per-section intensity, drum fills, chorus lift and karaoke lyrics.
@@ -277,6 +343,7 @@ function composeSong(opts: {
   let noteId = seedSalt * 100000;
   const nid = (p: string) => `${p}${noteId++}`;
   const melodyNotes: LocalNote[] = [];
+  const choirNotes: LocalNote[] = [];
   const padNotes: LocalNote[] = [];
   const bassNotes: LocalNote[] = [];
   const drumNotes: LocalNote[] = [];
@@ -342,13 +409,18 @@ function composeSong(opts: {
           degIdx = Math.max(0, Math.min(11, degIdx));
           const oct = Math.floor(degIdx / 5);
           const m2 = Math.max(60, Math.min(86, melodyBase + (rootPc - 9) + penta[degIdx % 5] + oct * 12 + (sec.lift ? 12 : 0) - 12));
-          const beat = b0 + (s * 4) / steps + (swing && s % 2 === 1 ? 0.08 : 0);
-          melodyNotes.push({
+          const beat = b0 + (s * 4) / steps + (swing && s % 2 === 1 ? 0.08 : 0) + (rand() - 0.5) * 0.05;
+          const note: LocalNote = {
             id: nid('m'), pitch: midiToPitch(m2), midi: m2,
             startBeat: Math.round(beat * 100) / 100,
             duration: steps >= 8 ? 0.45 : 0.8,
             velocity: Math.round(80 + sec.intensity * 16 + rand() * 8),
-          });
+          };
+          melodyNotes.push(note);
+          // Choir doubles the melody in choruses (vocal feel)
+          if (sec.intensity >= 0.85) {
+            choirNotes.push({ ...note, id: nid('c'), velocity: Math.max(40, note.velocity - 18) });
+          }
         }
       }
 
@@ -401,6 +473,7 @@ function composeSong(opts: {
   const tracks: Record<string, unknown>[] = [];
   let channel = 0;
   tracks.push({ id: 't-voz', name: 'Voz Guia', instrument: leadInst, channel: channel++, volume: 0.9, pan: 0, muted: false, solo: false, color: '#a855f7', notes: melodyNotes });
+  if (choirNotes.length) tracks.push({ id: 't-coro', name: 'Voz (Coro)', instrument: 'vocal_choir', channel: channel++, volume: 0.5, pan: 0, muted: false, solo: false, color: '#f472b6', notes: choirNotes });
   tracks.push({ id: 't-harmonia', name: 'Harmonia', instrument: padInst, channel: channel++, volume: 0.68, pan: 0.1, muted: false, solo: false, color: '#3b82f6', notes: padNotes });
   if (bassNotes.length) tracks.push({ id: 't-baixo', name: 'Baixo', instrument: bassInst, channel: channel++, volume: 0.9, pan: 0, muted: false, solo: false, color: '#22c55e', notes: bassNotes });
   if (arpNotes.length) tracks.push({ id: 't-arpejo', name: 'Arpejo', instrument: arpInst, channel: channel++, volume: 0.6, pan: -0.2, muted: false, solo: false, color: '#f59e0b', notes: arpNotes });
@@ -462,13 +535,24 @@ function sanitizeSongData(songData: Record<string, unknown>, fallback: ReturnTyp
 // Routes
 // ---------------------------------------------------------------------------
 app.get('/api/health', (_req: Request, res: Response) => {
-  res.json({ status: 'ok', timestamp: Date.now(), geminiEnabled: Boolean(GEMINI_API_KEY) });
+  res.json({
+    status: 'ok',
+    timestamp: Date.now(),
+    geminiEnabled: Boolean(GEMINI_API_KEY),
+    vocalsEnabled: Boolean(REPLICATE_API_TOKEN),
+  });
 });
 
 app.get('/api/engines', (_req: Request, res: Response) => {
   res.json({
-    engines: [{ id: 'flow', label: 'Motor Flow (seções + 2 variações)', recommended: true }],
+    engines: [
+      ...(REPLICATE_API_TOKEN
+        ? [{ id: 'replicate-music', label: `Música real com vocais (${REPLICATE_MUSIC_MODEL})`, recommended: true }]
+        : []),
+      { id: 'flow', label: 'Motor Flow (sintetizado local + coro)', recommended: !REPLICATE_API_TOKEN },
+    ],
     geminiEnabled: Boolean(GEMINI_API_KEY),
+    vocalsEnabled: Boolean(REPLICATE_API_TOKEN),
   });
 });
 
@@ -546,6 +630,7 @@ Regras: 4-5 faixas (voz principal, harmonia, baixo midi 30-48, bateria drum_kit 
       model: string,
       note: string | undefined,
       variant: string,
+      audioUrl?: string,
     ) => ({
       id: `song_${Date.now()}_${variant}_${Math.random().toString(36).substring(2, 7)}`,
       title: d.title,
@@ -559,6 +644,8 @@ Regras: 4-5 faixas (voz principal, harmonia, baixo midi 30-48, bateria drum_kit 
       updatedAt: Date.now(),
       tracks: d.tracks,
       lyrics: d.lyrics,
+      audioUrl,
+      audioMimeType: audioUrl ? 'audio/mpeg' : undefined,
       durationSeconds: safeDuration,
       generationModel: model,
       isFavorite: false,
@@ -567,8 +654,38 @@ Regras: 4-5 faixas (voz principal, harmonia, baixo midi 30-48, bateria drum_kit 
       lyriaNote: note,
     });
 
-    const songA = mkSong(dataA, usedModelA, noteA, 'a');
-    const songB = mkSong({ title: localB.title, tracks: localB.tracks, lyrics: localB.lyrics }, 'flow-composer', undefined, 'b');
+    // Real AI audio with vocals (Replicate) — 2 parallel variations.
+    // Falls back to local synth when no token or on any failure.
+    let songA = mkSong(dataA, usedModelA, noteA, 'a');
+    let songB = mkSong({ title: localB.title, tracks: localB.tracks, lyrics: localB.lyrics }, 'flow-composer', undefined, 'b');
+
+    if (REPLICATE_API_TOKEN) {
+      const lyricsHintA = localA.lyrics.map((l) => `[${l.section}] ${l.text}`).join('\n');
+      const lyricsHintB = localB.lyrics.map((l) => `[${l.section}] ${l.text}`).join('\n');
+      const fullPrompt = `${style} ${mood} song, ${safeBpm} BPM in ${key}: ${String(prompt).slice(0, 400)}`;
+      const [repA, repB] = await Promise.all([
+        replicateGenerate(`${fullPrompt} (variation 1)`, lyricsHintA, safeDuration),
+        replicateGenerate(`${fullPrompt} (variation 2)`, lyricsHintB, safeDuration),
+      ]);
+      if (repA) {
+        songA = mkSong(
+          { ...dataA, lyrics: mergeProviderLyrics(repA.lyricsText, localA.lyrics) },
+          'replicate-music',
+          'Voz e áudio reais gerados por IA (Replicate).',
+          'a',
+          repA.audioUrl,
+        );
+      }
+      if (repB) {
+        songB = mkSong(
+          { title: localB.title, tracks: localB.tracks, lyrics: mergeProviderLyrics(repB.lyricsText, localB.lyrics) },
+          'replicate-music',
+          'Voz e áudio reais gerados por IA (Replicate).',
+          'b',
+          repB.audioUrl,
+        );
+      }
+    }
 
     res.json({ success: true, songs: [songA, songB], song: songA });
   } catch (err: unknown) {
@@ -576,6 +693,21 @@ Regras: 4-5 faixas (voz principal, harmonia, baixo midi 30-48, bateria drum_kit 
     res.status(500).json({ error: 'Erro na geração de música', details: err instanceof Error ? err.message : String(err) });
   }
 });
+
+function mergeProviderLyrics(
+  text: string | undefined,
+  fallback: { section: string; text: string; startBeat: number; timestamp: number }[],
+): { section: string; text: string; startBeat: number; timestamp: number }[] {
+  if (!text || !text.trim()) return fallback;
+  const lines = text.split('\n').map((l) => l.trim()).filter(Boolean).slice(0, 24);
+  if (lines.length === 0) return fallback;
+  // Distribute provider lyric lines across the local section timeline for karaoke
+  return lines.map((line, i) => {
+    const anchor = fallback[Math.floor((i / lines.length) * fallback.length)] || fallback[fallback.length - 1];
+    const section = line.match(/^\[(.+?)\]/)?.[1] || anchor.section;
+    return { section, text: line.replace(/^\[.+?\]\s*/, '').slice(0, 300) || line, startBeat: anchor.startBeat, timestamp: anchor.timestamp };
+  });
+}
 
 function getRandomGradient(style: string, variant: string): string {
   const gradients: Record<string, string[]> = {

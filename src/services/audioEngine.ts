@@ -306,9 +306,52 @@ export class AudioEngine {
         osc2.stop(startTime + durationSec + 0.35);
         break;
       }
+      case 'vocal_choir': {
+        // "Aah" choir: detuned saws through ah-vowel formant bandpass filters
+        const formants = [730, 1090, 2440];
+        const gains = [0.5, 0.32, 0.18];
+        const master = ctx.createGain();
+        master.gain.setValueAtTime(0.0001, startTime);
+        master.gain.linearRampToValueAtTime(0.3 * velFactor, startTime + 0.09);
+        master.gain.setValueAtTime(0.3 * velFactor, startTime + Math.max(0.09, durationSec - 0.12));
+        master.gain.exponentialRampToValueAtTime(0.0001, startTime + durationSec + 0.1);
+        master.connect(destination);
+
+        const oscs: OscillatorNode[] = [];
+        for (const detune of [0, 4, -5]) {
+          const osc = ctx.createOscillator();
+          osc.type = 'sawtooth';
+          osc.frequency.setValueAtTime(freq, startTime);
+          osc.detune.setValueAtTime(detune, startTime);
+          // gentle vibrato like a human voice
+          const lfo = ctx.createOscillator();
+          lfo.frequency.setValueAtTime(5.2, startTime);
+          const lfoGain = ctx.createGain();
+          lfoGain.gain.setValueAtTime(6, startTime);
+          lfo.connect(lfoGain);
+          lfoGain.connect(osc.detune);
+          oscs.push(osc, lfo);
+          formants.forEach((f, fi) => {
+            const bp = ctx.createBiquadFilter();
+            bp.type = 'bandpass';
+            bp.frequency.setValueAtTime(f, startTime);
+            bp.Q.value = 7;
+            const fg = ctx.createGain();
+            fg.gain.setValueAtTime(gains[fi], startTime);
+            osc.connect(bp);
+            bp.connect(fg);
+            fg.connect(master);
+          });
+          osc.start(startTime);
+          lfo.start(startTime);
+          osc.stop(startTime + durationSec + 0.15);
+          lfo.stop(startTime + durationSec + 0.15);
+        }
+        void oscs;
+        break;
+      }
       case 'brass_section':
       case 'flute_sax': {
-        // Brass / Wind with bright attack and subtle vibrato
         const osc = ctx.createOscillator();
         const filter = ctx.createBiquadFilter();
         const gain = ctx.createGain();
@@ -481,7 +524,11 @@ export class AudioEngine {
     this.startBeatOffset = startBeat;
     this.isPlaying = true;
 
-    // Check if we have Lyria audio base64 or audioUrl
+    // Check if we have real rendered audio (Replicate URL or Lyria base64)
+    if (project.audioUrl) {
+      this.playUrlAudio(project.audioUrl, startBeat);
+      return;
+    }
     if (project.audioBase64) {
       this.playBase64Audio(project.audioBase64, project.audioMimeType || 'audio/wav', startBeat);
       return;
@@ -558,6 +605,49 @@ export class AudioEngine {
         this.onPlaybackEndListeners.forEach((fn) => fn());
       }
     }, intervalMs);
+  }
+
+  private playUrlAudio(url: string, startOffsetBeat: number) {
+    try {
+      if (this.audioEl) {
+        this.audioEl.pause();
+        this.audioEl = null;
+      }
+      const audio = new Audio(url);
+      this.audioEl = audio;
+      const secondsPerBeat = 60 / this.tempoBpm;
+
+      audio.onloadedmetadata = () => {
+        if (startOffsetBeat > 0 && audio.duration) {
+          audio.currentTime = Math.min(audio.duration - 0.5, startOffsetBeat * secondsPerBeat);
+        }
+      };
+
+      if (this.ctx && this.masterGain && this.analyser) {
+        try {
+          const source = this.ctx.createMediaElementSource(audio);
+          source.connect(this.masterGain);
+        } catch {
+          // Fallback direct playback
+        }
+      }
+
+      audio.play().catch(console.error);
+
+      audio.ontimeupdate = () => {
+        if (!this.isPlaying) return;
+        const curBeat = audio.currentTime / secondsPerBeat;
+        const totBeats = (audio.duration || 60) / secondsPerBeat;
+        this.onBeatUpdateListeners.forEach((fn) => fn(curBeat, totBeats));
+      };
+
+      audio.onended = () => {
+        this.stop();
+        this.onPlaybackEndListeners.forEach((fn) => fn());
+      };
+    } catch (err) {
+      console.error('Error playing URL audio:', err);
+    }
   }
 
   private playBase64Audio(base64: string, mimeType: string, startOffsetBeat: number) {
@@ -645,7 +735,15 @@ export class AudioEngine {
    * Renders the complete multi-track song project to a standard 16-bit 44.1kHz stereo WAV Blob
    */
   public async renderProjectToWav(project: SongProject): Promise<Blob> {
-    // If project already has Lyria audio base64, return decoded blob directly
+    // If project has real AI audio URL, fetch it directly
+    if (project.audioUrl) {
+      try {
+        const r = await fetch(project.audioUrl);
+        if (r.ok) return await r.blob();
+      } catch (e) {
+        console.warn('URL audio fetch failed, rendering synth:', e);
+      }
+    }
     if (project.audioBase64) {
       const binary = atob(project.audioBase64);
       const bytes = new Uint8Array(binary.length);

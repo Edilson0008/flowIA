@@ -55,6 +55,7 @@ const GM_INSTRUMENT_MAP: Record<string, number> = {
   strings_ensemble: 48,      // String Ensemble 1
   brass_section: 61,         // Brass Section
   flute_sax: 73,             // Flute
+  vocal_choir: 52,           // Choir Aahs
 };
 
 interface MidiEvent {
